@@ -1,0 +1,185 @@
+# ✅ Step 1: Install Required Packages
+!pip install -q google-cloud-bigquery google-generativeai pandas matplotlib seaborn xlsxwriter
+
+# ✅ Step 2: Import Libraries
+from google.colab import auth
+from google.cloud import bigquery
+import google.generativeai as genai
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import io
+import base64
+import getpass
+
+# ✅ Step 3: Authenticate BigQuery and Configure Gemini
+auth.authenticate_user()
+project_id = "testdatapayment"
+client = bigquery.Client(project=project_id)
+
+genai.configure(api_key="AIzaSyB6aqpbrnXRzpAvAzHUJr-jGMgr-549PKo")  # Replace with your API key
+
+# ✅ Step 4: Gemini + BigQuery Helpers
+def query_to_sql_with_gemini(user_query):
+    try:
+        model = genai.GenerativeModel("models/gemini-1.5-flash")
+        prompt = f"""
+        You are a BigQuery expert. Based on the user question below, write a BigQuery SQL query.
+        Ensure you fully qualify the table name with the dataset `payment_data_colab`. For example, use `payment_data_colab.table_name`.
+
+        Here are the schemas of the available tables:
+
+        - `payment_data_colab.daily_summary_by_country`:
+          - `transaction_date` (DATE)
+          - `country` (STRING)
+          - `transaction_count` (INTEGER)
+          - `total_amount_usd_equivalent` (FLOAT)
+          - `average_transaction_amount` (FLOAT)
+          - `successful_transactions` (INTEGER)
+          - `failed_transactions` (INTEGER)
+          - `unique_users` (INTEGER)
+          Use this table for questions about daily metrics broken down by country.
+
+        - `payment_data_colab.daily_summary_by_region`:
+          - `transaction_date` (DATE)
+          - `region` (STRING)
+          - `transaction_count` (INTEGER)
+          - `total_amount_usd_equivalent` (FLOAT)
+          - `average_transaction_amount` (FLOAT)
+          - `successful_transactions` (INTEGER)
+          - `failed_transactions` (INTEGER)
+          - `unique_users` (INTEGER)
+          Use this table for questions about daily metrics broken down by region.
+
+        - `payment_data_colab.transactions_colab`:
+          - `payment_id` (STRING)
+          - `transaction_id` (STRING)
+          - `user_id` (STRING)
+          - `merchant_id` (STRING)
+          - `amount` (FLOAT)
+          - `currency` (STRING)
+          - `payment_method` (STRING) - Find the highest payment amount using the payment method 'Debit Card' (case-sensitive, with a capital 'D' and 'C') in 2024."
+          - `card_type` (STRING)
+          - `status` (STRING)
+          - `status` (STRING) - Indicates transaction outcome. Possible values are 'Success' and 'Failed' (case-sensitive).
+          - `transaction_timestamp` (TIMESTAMP)
+              Use this table for detailed information about individual transactions. Look for the `status` column (values are case-sensitive 'Success' and 'Failed') and `transaction_timestamp` for date-based filtering.
+
+        Based on the user question:
+        {user_query}
+
+        Only return the SQL query (no markdown or explanations).
+        """
+        response = model.generate_content(prompt, generation_config={"max_output_tokens": 512, "temperature": 0.3})
+        sql = response.text.strip()
+        print("🔎 Gemini Raw Output:", sql)
+        if '```' in sql:
+            parts = sql.split('```')
+            if len(parts) > 1:
+                sql = parts[1].strip()
+            else:
+                sql = ""  # Handle case where only one or no backticks are present
+        if sql.lower().startswith("sql"):
+            sql = sql[3:].strip()
+        sql = sql.strip()  # Ensure no leading/trailing whitespace
+        return sql
+    except Exception as e:
+        print("Gemini API Error:", e)
+        return "-- Gemini failed to generate SQL --"
+
+def generate_summary_with_gemini(df, user_query):
+    try:
+        if df.empty:
+            return "No data found for this query."
+        model = genai.GenerativeModel("models/gemini-1.5-flash")
+        prompt = f"""
+You are a data analyst assistant.
+Based on the dataframe below and the user query, write a brief natural language summary.
+
+User query: {user_query}
+
+Data:
+{df.head(10).to_markdown()}
+"""
+        response = model.generate_content(prompt)
+        clean_text = response.text.encode("utf-8", "ignore").decode("utf-8", "ignore")
+        return clean_text.strip()
+    except Exception as e:
+        print("Gemini summary error:", e)
+        return "Summary could not be generated."
+
+# ✅ Step 5: Command-Line Interaction Loop
+while True:
+    user_query = input("\n🔎 Enter your payment-related question (or 'exit' to quit): ").strip()
+    if user_query.lower() in ["exit", "quit"]:
+        print("👋 Exiting CLI assistant.")
+        break
+
+    print("\n🛠️ Calling Gemini to generate SQL...")
+    sql = query_to_sql_with_gemini(user_query)
+    print(f"\n🧠 Generated SQL:\n{sql}")
+
+   # if "select" not in sql.lower():
+    #    print("❌ Invalid SQL generated. Please refine your query.")
+     #   continue
+
+    try:
+        print("\n🚀 Running SQL query on BigQuery...")
+        print(f"🔍 SQL Query being sent to BigQuery: >>>{sql}<<<")  # Print with delimiters
+        df = client.query(sql).result().to_dataframe()
+        print(f"✅ BigQuery returned {len(df)} rows.")
+        print(f"\n📊 Query Results:\n{df.to_string(index=False)}")
+        # ... rest of your code ...
+    except Exception as e:
+        print("❗ Error running query:", str(e))
+
+        # ✅ Export to Excel with chart and summary
+        import xlsxwriter
+        excel_path = "query_report.xlsx"
+
+        print("\n📦 Writing results to Excel report...")
+        with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Data')
+            workbook = writer.book
+            worksheet = writer.sheets['Data']
+
+            # Add a chart if plottable
+            if df.shape[1] >= 2 and pd.api.types.is_numeric_dtype(df.iloc[:,1]):
+                chart = workbook.add_chart({'type': 'column'})
+                chart.add_series({
+                    'name':     df.columns[1],
+                    'categories': ['Data', 1, 0, len(df), 0],
+                    'values':     ['Data', 1, 1, len(df), 1],
+                })
+                chart.set_title({'name': f"{df.columns[1]} by {df.columns[0]}"})
+                worksheet.insert_chart("E2", chart)
+
+            # Summary sheet
+            print("\n🧠 Generating summary with Gemini...")
+            summary = generate_summary_with_gemini(df, user_query)
+            print("✅ Summary generated.")
+            summary_sheet = workbook.add_worksheet("Summary")
+            summary_sheet.write("A1", "User Query:")
+            summary_sheet.write("B1", user_query)
+            summary_sheet.write("A2", "Gemini Summary:")
+            summary_sheet.write("B2", summary)
+
+        print("💾 Excel report saved as 'query_report.xlsx'")
+
+        # ✅ Preview Excel inside Colab
+        import openpyxl
+        from IPython.display import display, HTML
+
+        wb = openpyxl.load_workbook("query_report.xlsx")
+        sheet = wb["Data"]
+
+        data = sheet.values
+        cols = next(data)
+        df_preview = pd.DataFrame(data, columns=cols)
+
+        print("👁 Preview of the Excel 'Data' sheet:")
+        display(HTML(df_preview.head().to_html(index=False)))
+        print(f"\n📝 Summary:\n{summary}")
+
+    except Exception as e:
+        print("❗ Error running query:", str(e))
