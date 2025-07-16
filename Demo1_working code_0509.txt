@@ -17,7 +17,7 @@ auth.authenticate_user()
 project_id = "testdatapayment"
 client = bigquery.Client(project=project_id)
 
-genai.configure(api_key="AIzaSyB6aqpbrnXRzpAvAzHUJr-jGMgr-549PKo")  # Replace with your API key
+genai.configure(api_key="API_KEY")  # Replace with your API key
 
 # ✅ Step 4: Gemini + BigQuery Helpers
 def query_to_sql_with_gemini(user_query):
